@@ -284,6 +284,23 @@ public class GlassWindow : Window
 		}
 	}
 
+	private string KeepVisibleKind()
+	{
+		if (this is DockWindow)
+		{
+			return "Dock";
+		}
+		if (this is WidgetWindow)
+		{
+			return "Widget";
+		}
+		if (this is IslandWindow)
+		{
+			return "Island";
+		}
+		return GetType().Name;
+	}
+
 	private void NoteRejectedHide()
 	{
 		int now = Environment.TickCount;
@@ -407,29 +424,29 @@ public class GlassWindow : Window
 			{
 				Store.Log(ex);
 			}
-			// 屏蔽「显示桌面」的最小化广播：Dock 与组件保持可见（与系统任务栏同等待遇）。
-			// 不校验 lParam：键盘触发（Win+D / Win+M）时 lParam=0，点击任务栏右侧
-			// 「显示桌面」竖条触发时 lParam 为鼠标坐标——两种都要拦，且本窗口没有
-			// 最小化按钮，任何外部 SC_MINIMIZE 都是广播而非用户主动操作。
-			InstallShowDesktopShield(new WindowInteropHelper(this).Handle);
+			// 只保护一直放在桌面上的 Dock / 灵动岛 / 组件。启动台、控制中心会自己 Hide，
+			// 拦截它们的 SW_HIDE 会把已经关掉的面板留在最前面（0.9.22.2 的 BoardWindow）。
+			bool keepVisible = ShowDesktopRules.KeepVisibleSurface(KeepVisibleKind());
+			if (keepVisible)
+			{
+				InstallShowDesktopShield(new WindowInteropHelper(this).Handle);
+			}
 			HwndSource.FromHwnd(new WindowInteropHelper(this).Handle)?.AddHook((IntPtr hwnd, int msg, IntPtr wp, IntPtr lp, ref bool handled) =>
 			{
-				if (msg == 274 && ((wp.ToInt64() & 0xFFF0) == 0xF020))
+				if (keepVisible && msg == 274 && ((wp.ToInt64() & 0xFFF0) == 0xF020))
 				{
 					handled = true;
 					return IntPtr.Zero;
 				}
-				// 第二道：若子类化没装上，WPF 钩子里再清一次 SWP_HIDEWINDOW。
-				// 不能在这里清 ExternalHideAllowed——SW_HIDE 先发 WM_SHOWWINDOW，后发 WINDOWPOSCHANGING。
-				if (msg == 0x0046)
+				if (keepVisible && msg == 0x0046)
 				{
 					StripUnsolicitedHide(lp);
 				}
-				else if (msg == 0x007C && wp.ToInt64() == -16)
+				else if (keepVisible && msg == 0x007C && wp.ToInt64() == -16)
 				{
 					StripStyleHide(lp);
 				}
-				if (msg == 24 && wp == IntPtr.Zero && lp == IntPtr.Zero && !ExternalHideAllowed && !windowClosing)
+				if (keepVisible && msg == 24 && wp == IntPtr.Zero && lp == IntPtr.Zero && !ExternalHideAllowed && !windowClosing)
 				{
 					handled = true;
 					NoteRejectedHide();

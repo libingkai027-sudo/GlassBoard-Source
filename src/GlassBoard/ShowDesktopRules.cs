@@ -124,10 +124,38 @@ public static class ShowDesktopRules
 		return false;
 	}
 
-	// 有一个真正的应用窗口已经回到桌面层之上（显示桌面结束）。
-	public static bool LiveAppAboveDesktop(IReadOnlyList<ZWindow> topToBottom)
+	// 普通前台/背景窗口：要能盖住 Dock。小工具窗（Edge 344×206）和壁纸进程不算。
+	public static bool IsNormalApp(ZWindow w)
 	{
-		bool app = false;
+		if (!w.Visible || w.Cloaked || w.Iconic || w.Topmost)
+		{
+			return false;
+		}
+		if (w.Desktop || w.ShellChrome || w.Tracked || w.Self || w.Ambient)
+		{
+			return false;
+		}
+		if (w.Tool || w.Owned)
+		{
+			return w.Width >= 800 && w.Height >= 480;
+		}
+		return w.Width >= MinLiveWidth && w.Height >= MinLiveHeight;
+	}
+
+	// 只有 Dock / 灵动岛 / 桌面组件拒绝外部 SW_HIDE。启动台等面板必须能被自己关掉。
+	public static bool KeepVisibleSurface(string kind)
+	{
+		return kind == "Dock" || kind == "Island" || kind == "Widget";
+	}
+
+	// 显示桌面修复绝不把窗口设成 WS_EX_TOPMOST。置顶只会挡住普通窗口，并且一放开就来回跳。
+	public static bool ShouldForceTopmost()
+	{
+		return false;
+	}
+
+	public static bool IsNormalAppAboveDesktop(IReadOnlyList<ZWindow> topToBottom)
+	{
 		for (int i = 0; i < topToBottom.Count; i++)
 		{
 			ZWindow w = topToBottom[i];
@@ -137,19 +165,96 @@ public static class ShowDesktopRules
 			}
 			if (w.Desktop)
 			{
-				return app;
+				return false;
 			}
-			if (w.Iconic || w.Tool || w.Owned || w.Tracked || w.Self || w.Ambient || w.ShellChrome)
+			if (IsNormalApp(w))
 			{
-				continue;
+				return true;
 			}
-			if (w.Width < MinLiveWidth || w.Height < MinLiveHeight)
-			{
-				continue;
-			}
-			app = true;
 		}
 		return false;
+	}
+
+	// 登记的 Dock/岛/组件在某个 explorer 桌面层下面（被桌面盖住）。
+	public static bool TrackedUnderDesktop(IReadOnlyList<ZWindow> topToBottom)
+	{
+		bool seenDesktop = false;
+		for (int i = 0; i < topToBottom.Count; i++)
+		{
+			ZWindow w = topToBottom[i];
+			if (!w.Visible || w.Cloaked || w.Topmost)
+			{
+				continue;
+			}
+			if (w.Desktop)
+			{
+				seenDesktop = true;
+				continue;
+			}
+			if (seenDesktop && w.Tracked && !w.Iconic)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// 登记窗口盖住了至少一个普通应用（前台或更旧的窗口）。这就是 0.9.22.2 放开置顶后仍挡窗口的状态。
+	public static bool TrackedAboveNormalApp(IReadOnlyList<ZWindow> topToBottom)
+	{
+		bool tracked = false;
+		for (int i = 0; i < topToBottom.Count; i++)
+		{
+			ZWindow w = topToBottom[i];
+			if (!w.Visible || w.Cloaked)
+			{
+				continue;
+			}
+			if (w.Tracked)
+			{
+				tracked = true;
+			}
+			if (tracked && IsNormalApp(w))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// 需要动一次 Z 序：被桌面盖住，或盖住了普通窗口。已经在「所有普通窗口下面、桌面上面」时返回 false。
+	public static bool NeedsReorder(IReadOnlyList<ZWindow> topToBottom)
+	{
+		return TrackedUnderDesktop(topToBottom) || TrackedAboveNormalApp(topToBottom);
+	}
+
+	// 插到这个窗口下面（也就是最高的 explorer 桌面层上面）。-1 = 没有桌面层，别动。-2 = 桌面层上面没有可参照的窗口，用 HWND_TOP（非置顶）。
+	public static int InsertAfterIndex(IReadOnlyList<ZWindow> topToBottom)
+	{
+		int desktop = -1;
+		for (int i = 0; i < topToBottom.Count; i++)
+		{
+			ZWindow w = topToBottom[i];
+			if (w.Visible && !w.Cloaked && w.Desktop)
+			{
+				desktop = i;
+				break;
+			}
+		}
+		if (desktop < 0)
+		{
+			return -1;
+		}
+		for (int i = desktop - 1; i >= 0; i--)
+		{
+			ZWindow w = topToBottom[i];
+			if (!w.Visible || w.Cloaked || w.Topmost || w.Desktop || w.Tracked || (w.ShellChrome && !w.Desktop))
+			{
+				continue;
+			}
+			return i;
+		}
+		return -2;
 	}
 
 	// 显示桌面仍把普通窗口最小化挂在抬高的桌面层下面，且最上面的非工具窗口就是桌面层。
@@ -185,6 +290,21 @@ public static class ShowDesktopRules
 			}
 		}
 		return saw && firstIsDesktop && iconic;
+	}
+
+	public static bool LiveAppAboveDesktop(IReadOnlyList<ZWindow> topToBottom)
+	{
+		return IsNormalAppAboveDesktop(topToBottom);
+	}
+
+	// 给灵动岛用的“正在显示桌面”。不表示置顶。普通窗口已经在桌面层上面时必须为 false。
+	public static bool ShowDesktopSession(IReadOnlyList<ZWindow> topToBottom)
+	{
+		if (IsNormalAppAboveDesktop(topToBottom))
+		{
+			return false;
+		}
+		return TrackedUnderDesktop(topToBottom) || ShellHolding(topToBottom);
 	}
 
 	// 复位时插到“桌面层正上方那个普通应用”的下面，这样前台窗口盖住 Dock，Dock 仍盖住桌面。
@@ -320,13 +440,19 @@ public static class ShowDesktopRules
 		ZWindow progman = Desk();
 		ZWindow iconic = Live(iconic: true, width: 900, height: 700);
 		ZWindow dock = Live(tool: true, tracked: true, width: 1192, height: 106);
-		ZWindow dockTop = dock;
-		dockTop.Topmost = true;
 		ZWindow wallpaper = Live(ambient: true, width: 1920, height: 1080);
 		List<ZWindow> normal = new List<ZWindow> { notepad, dock, progman, iconic };
+		Expect(!ShouldForceTopmost(), "show desktop must not force topmost");
+		Expect(KeepVisibleSurface("Dock") && KeepVisibleSurface("Island") && KeepVisibleSurface("Widget"), "keep dock island widget");
+		Expect(!KeepVisibleSurface("Board") && !KeepVisibleSurface("ControlCenter"), "launcher hide stays allowed");
 		Expect(!DesktopCoversLive(normal), "normal z-order is not show desktop");
 		Expect(LiveAppAboveDesktop(normal), "an app above the desktop means show desktop ended");
 		Expect(!ShellHolding(normal), "a normal app on top is not shell holding");
+		Expect(!NeedsReorder(normal) && !ShowDesktopSession(normal), "desktop visible and app above dock: no move");
+		for (int frame = 0; frame < 20; frame++)
+		{
+			Expect(!NeedsReorder(normal) && !ShouldForceTopmost(), "no raise loop while a normal app covers the dock");
+		}
 		List<ZWindow> minimizedOnly = new List<ZWindow> { notepad, progman, iconic };
 		Expect(!DesktopCoversLive(minimizedOnly), "iconic windows under Progman are normal");
 		List<ZWindow> raised = new List<ZWindow> { edge, worker, dock, iconic, progman };
@@ -345,33 +471,29 @@ public static class ShowDesktopRules
 		List<ZWindow> wallpaperHeld = new List<ZWindow> { wallpaper, edge, worker, iconic };
 		Expect(!LiveAppAboveDesktop(wallpaperHeld), "wallpaper engine is not a restored app");
 		Expect(ShellHolding(wallpaperHeld), "wallpaper does not clear shell holding");
-		Latch held = default(Latch);
-		held = Step(held, covers: true, appsBack: false, shellHolding: true);
-		Expect(held.On, "cover raises");
-		for (int i = 0; i < 12; i++)
-		{
-			held = Step(held, covers: false, appsBack: false, shellHolding: true);
-		}
-		Expect(held.On, "stay raised while the shell still holds minimized apps");
-		held = Step(held, covers: false, appsBack: true, shellHolding: true);
-		held = Step(held, covers: false, appsBack: true, shellHolding: false);
-		Expect(held.On, "release waits for stable samples");
-		held = Step(held, covers: false, appsBack: true, shellHolding: false);
-		Expect(!held.On && held.Calm == 0, "third quiet sample releases");
-		Latch again = default(Latch);
-		for (int cycle = 0; cycle < 5; cycle++)
-		{
-			again = Step(again, covers: true, appsBack: false, shellHolding: true);
-			Expect(again.On, "repeat win+d raises");
-			again = Step(again, covers: false, appsBack: true, shellHolding: false);
-			again = Step(again, covers: false, appsBack: true, shellHolding: false);
-			again = Step(again, covers: false, appsBack: true, shellHolding: false);
-			Expect(!again.On, "repeat win+d releases");
-		}
 		Expect(!ShouldHideIsland(showDesktop: true, manualGame: false, autoGame: false, fullscreen: true, maximized: false, showOnFullscreen: false, expanded: true, toast: false, alreadyHidden: false), "expanded island is not hidden by show desktop");
-		List<ZWindow> topmostDock = new List<ZWindow> { dockTop, edge, worker, iconic, progman };
-		Expect(!DesktopCoversLive(topmostDock), "temporary topmost dock is no longer covered");
-		Expect(ShellHolding(topmostDock), "topmost dock does not look like the desktop went away");
+		ZWindow cursor = Live(width: 1300, height: 810);
+		ZWindow older = Live(width: 1100, height: 700);
+		List<ZWindow> aboveOlder = new List<ZWindow> { cursor, dock, older, progman };
+		Expect(TrackedAboveNormalApp(aboveOlder) && NeedsReorder(aboveOlder), "dock below the foreground can still cover an older window");
+		Expect(!ShouldForceTopmost(), "covering an older window must not turn topmost on");
+		List<ZWindow> sunk = new List<ZWindow> { cursor, older, dock, progman };
+		Expect(!NeedsReorder(sunk) && !ShowDesktopSession(sunk), "after one sink, foreground and older windows cover the dock");
+		for (int frame = 0; frame < 20; frame++)
+		{
+			Expect(!NeedsReorder(sunk) && !ShouldForceTopmost(), "switching apps does not start a raise or reshow loop");
+		}
+		List<ZWindow> showDesktop = new List<ZWindow> { worker, dock, iconic };
+		Expect(NeedsReorder(showDesktop) && ShowDesktopSession(showDesktop) && !ShouldForceTopmost(), "show desktop lifts without topmost");
+		List<ZWindow> lifted = new List<ZWindow> { dock, worker, iconic };
+		Expect(!NeedsReorder(lifted) && ShowDesktopSession(lifted), "after one lift the desktop session stays without another move");
+		for (int frame = 0; frame < 20; frame++)
+		{
+			Expect(!NeedsReorder(lifted) && !ShouldForceTopmost(), "show desktop does not oscillate topmost");
+		}
+		List<ZWindow> edgeOnly = new List<ZWindow> { edge, dock, progman };
+		Expect(!NeedsReorder(edgeOnly), "a small edge tool window is not a normal app to sink under");
+		Expect(InsertAfterIndex(aboveOlder) == 2, "sink target is the older window just above the desktop");
 	}
 
 	private static List<ZWindow> LongStack(ZWindow edge, ZWindow worker, ZWindow dock, ZWindow iconic)
