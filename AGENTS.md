@@ -5,7 +5,7 @@
 Windows 桌面启动台：毛玻璃 Dock 栏、应用启动台、控制中心、桌面组件（时钟/天气/音乐/律动）、灵动岛、壁纸引擎（静态 + 自定义视频动态壁纸）。.NET Framework 4.8，WPF + WinForms，C# LangVersion 14。
 
 - 仓库：https://github.com/llm147369/GlassBoard-Source（remote 已配好）
-- 当前版本：**v0.9.22.0**（2026-11-20）
+- 当前版本：**v0.9.22.4**（2026-11-24，壁纸锚点改为最高的可见 WorkerW，不再贴 Progman；UI/配置仍与 0.9.22.0 兼容）
 - 工作目录：本仓库根目录（便携版运行目录与源码仓库是同一个目录，`GlassBoard.exe` 在根目录直接运行）
 
 ## 常用命令链
@@ -75,7 +75,8 @@ gh release upload vX.Y.Z "publish\GlassBoard_vX.Y.Z_User.zip" --clobber
 |---|---|
 | Controller.cs | 全局编排、设置页、托盘、系统入口（4000+ 行） |
 | DockWindow.cs | Dock 栏：悬停放大引擎（渲染帧驱动）、倒影、图标管线（7000+ 行） |
-| GlassWindow.cs | 玻璃窗口基类：捕获/烘焙/材质/LiveBlur |
+| GlassWindow.cs | 玻璃窗口基类：捕获/烘焙/材质/LiveBlur；拦截显示桌面对工具窗口的 SW_HIDE |
+| ShowDesktopRules.cs / DesktopCoverGuard.cs | Win+D 判定与临时置顶（完整 Z 序，状态翻转才改 Z 序） |
 | GlassCapture.cs / WallpaperSource.cs | 壁纸层捕获、静态壁纸渲染 |
 | GlassMaterials.cs | BoxBlur/Bake/BakeLive/折射（CPU 位图管线） |
 | VideoWallpaper.cs | 视频动态壁纸（WebView2 + WorkerW 挂载 + watchdog） |

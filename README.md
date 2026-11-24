@@ -1,4 +1,4 @@
-# GlassBoard-Source v0.9.22.1
+# GlassBoard-Source v0.9.22.4
 
 一个运行在 Windows 10/11 上的免费桌面启动台——毛玻璃 Dock 栏、应用面板、控制中心、桌面组件、灵动岛、壁纸引擎，一次装齐。
 
@@ -38,10 +38,47 @@ dotnet build src\GlassBoard.csproj -c Release
 
 ## 发布说明
 
-本仓库源码对应 v0.9.22.1（程序集版本 0.9.22.1）。仓库根目录直接存放编译好的便携版（拉取即用，双击 `GlassBoard.exe` 运行）；GitHub Release 页面同时提供便携压缩包。源码位于 `src\` 目录，仅供开发者参考与修改。
+本仓库源码对应 v0.9.22.4（程序集版本 0.9.22.4）。仓库根目录里的 `GlassBoard.exe` 仍是更早的便携文件。配置文件 `layout.json` 与 v0.9.22.0 兼容。
 
+### v0.9.22.4 更新内容
 
+- 显示桌面时不再把 Dock / 灵动岛 / 组件贴到 Progman 上。本机壁纸是两个全屏 WorkerW（上面一层带桌面图标列表，下面一层是 Wallpaper Engine），都在 Progman 前面；锚点改成这两层里更靠前的那一层。
+- 前台已经是普通窗口时，只在自己盖住这个前台窗口时才挪到它下面，不再为了“下沉”去贴 Progman。
+- 关系变化时写一行 `COVERGUARD topo`（仅自己的可见/最小化/cloak/置顶，以及壁纸层种类），方便事后对照，不必为了看状态而切回前台。
+- Linux 上的规则测试不能代替这台机器上的 Win+D。未在 Windows 上验证。
 
+### v0.9.22.3 更新内容
+
+- 修正 0.9.22.2：显示桌面守护不再临时置顶，也不再每秒在置顶和放开之间切换。AlwaysOnTop 关闭时，普通窗口应盖住 Dock 和组件；显示桌面时只把它们放到桌面层之上，不进入置顶带。
+- 外部隐藏拦截只留给 Dock、灵动岛和桌面组件。应用启动台被关掉时不再被拦下来留在最前面。
+- 守护不再每拍枚举全部顶层窗口。这不是对“鼠标卡住”的修复结论；那种卡顿是在旧版上看到的，0.9.22.2 有没有同样现象还没有证实。
+
+### v0.9.22.2 更新内容
+
+- 修复：Windows 10 22H2 按 Win+D 后，Dock、灵动岛、右侧组件会一直消失。显示桌面对工具窗口调用 `ShowWindow(SW_HIDE)`，只拦截 `WM_SHOWWINDOW` 取消不了后面的 `SWP_HIDEWINDOW`，窗口变成不可见、未最小化、未 Cloak，外壳也不会在下一次 Win+D 把它们恢复回来。
+- 修复：临时置顶不再只看“第一个非置顶窗口是不是 Progman”，也不再只向上走 64 个句柄。Edge 工具小窗和 300 多个顶层窗口会让旧判断提前放下置顶，桌面层还盖着的时候窗口就被沉下去。
+- 修复：灵动岛的全屏隐藏不再把显示桌面时的前台抖动当成全屏游戏。真正的全屏/手动游戏模式仍会隐藏。
+- 行为：显示桌面期间临时置顶，普通窗口回来后取消置顶，并排到普通窗口下面、桌面层上面。不永久置顶，不额外启动进程，不调用会把所有最小化窗口一起还原的 ToggleDesktop。
+
+在 Windows 上编译（.NET SDK 8 或便携 .NET 10 SDK 均可，目标仍是 net48）：
+
+```powershell
+Remove-Item Env:\DOTNET_STARTUP_HOOKS -ErrorAction SilentlyContinue
+dotnet build src\GlassBoard.csproj -c Release
+# 输出：src\bin\Release\net48\GlassBoard.exe
+dotnet run --project tests\ShowDesktopRulesTest -c Release
+GlassBoard.exe --self-test
+```
+
+装上之前先退出正在运行的 GlassBoard，保留现有 `%LOCALAPPDATA%\GlassBoard\layout.json`。本环境没有 Windows 桌面，不能代替实机看 Win+D。建议在 Windows 10 22H2 上人工确认：
+
+| 步骤 | 期望 |
+|---|---|
+| Dock/灵动岛置顶关、自动隐藏关，连按 Win+D 再恢复，重复多轮 | 三者都还在，不是最小化也不是一直隐藏 |
+| 恢复后打开普通窗口盖住它们的位置 | 普通窗口盖住它们，它们不一直浮在最上面 |
+| 真正的全屏游戏或全屏视频 | 灵动岛仍按原策略避开；退出全屏后回来 |
+| 显示桌面时点 Dock 上的一个程序 | 只启动或恢复这一个，不会把之前最小化的窗口全部还原 |
+| 手动游戏模式 | Dock 和组件仍然隐藏 |
 
 ### v0.9.22.1 更新内容
 

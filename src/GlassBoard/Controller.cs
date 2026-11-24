@@ -5003,7 +5003,8 @@ public class Controller
 	public void ApplyGameMode()
 	{
 		Dock.GamePolling(Prefs.AutoGameMode);
-		bool flag = GameModeRules.Suppressed(Prefs.GameMode, Prefs.AutoGameMode, Prefs.AutoGameMode && FullscreenState.Active(), desktop: false);
+		bool showDesktop = DesktopCoverGuard.ShowDesktopActive;
+		bool flag = GameModeRules.Suppressed(Prefs.GameMode, Prefs.AutoGameMode, !showDesktop && Prefs.AutoGameMode && FullscreenState.Active(), showDesktop);
 		if (flag == glassSuppressed)
 		{
 			return;

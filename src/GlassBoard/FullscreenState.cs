@@ -48,10 +48,24 @@ public static class FullscreenState
 	[DllImport("user32.dll")]
 	private static extern uint GetWindowThreadProcessId(IntPtr window, out uint id);
 
+	[DllImport("user32.dll")]
+	private static extern bool IsWindowVisible(IntPtr window);
+
+	[DllImport("user32.dll")]
+	private static extern bool IsIconic(IntPtr window);
+
+	[DllImport("dwmapi.dll")]
+	private static extern int DwmGetWindowAttribute(IntPtr window, int attribute, out int value, int size);
+
 	public static bool Active()
 	{
 		IntPtr foregroundWindow = GetForegroundWindow();
-		if (foregroundWindow == IntPtr.Zero)
+		if (foregroundWindow == IntPtr.Zero || !IsWindowVisible(foregroundWindow) || IsIconic(foregroundWindow))
+		{
+			return false;
+		}
+		int cloaked;
+		if (DwmGetWindowAttribute(foregroundWindow, 14, out cloaked, 4) == 0 && cloaked != 0)
 		{
 			return false;
 		}
@@ -62,7 +76,7 @@ public static class FullscreenState
 		}
 		StringBuilder stringBuilder = new StringBuilder(256);
 		GetClassName(foregroundWindow, stringBuilder, 256);
-		if (new string[4] { "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd" }.Contains(stringBuilder.ToString()))
+		if (new string[5] { "Progman", "WorkerW", "SHELLDLL_DefView", "Shell_TrayWnd", "Shell_SecondaryTrayWnd" }.Contains(stringBuilder.ToString()))
 		{
 			return false;
 		}

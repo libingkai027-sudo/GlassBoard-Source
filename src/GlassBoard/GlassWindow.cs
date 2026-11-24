@@ -48,9 +48,16 @@ public class GlassWindow : Window
 
 	protected bool MotionEnabled = true;
 
-	// 主动隐藏的通行证：游戏模式等主动 Hide() 前先置位；外部广播（显示桌面等）引发的
-	// WM_SHOWWINDOW(hide) 没有通行证一律拦截，防止 Dock/组件被系统藏掉。
+	// 主动隐藏的通行证：游戏模式等主动 Hide() 前先置位。显示桌面对工具窗口走
+	// ShowWindow(SW_HIDE)：先 WM_SHOWWINDOW，再 SetWindowPos(SWP_HIDEWINDOW)。
+	// 只吞 WM_SHOWWINDOW 取消不了隐藏，必须在窗口过程里清掉 SWP_HIDEWINDOW。
 	internal bool ExternalHideAllowed;
+
+	private IntPtr prevWndProc;
+
+	private IntPtr shieldedHwnd;
+
+	private WndProc showDesktopShield;
 
 	// 窗口正在关闭（Close 流程会先走 WM_SHOWWINDOW(hide)）；此状态下外部隐藏拦截放行，
 	// 否则控制中心这类“关闭即销毁”的面板会关不掉。
@@ -59,7 +66,27 @@ public class GlassWindow : Window
 	internal void HideWithConsent()
 	{
 		ExternalHideAllowed = true;
-		Hide();
+		try
+		{
+			Hide();
+		}
+		finally
+		{
+			ExternalHideAllowed = false;
+		}
+	}
+
+	internal void ConcealWithConsent()
+	{
+		ExternalHideAllowed = true;
+		try
+		{
+			Visibility = Visibility.Hidden;
+		}
+		finally
+		{
+			ExternalHideAllowed = false;
+		}
 	}
 
 	protected double MotionLevel = 1.0;
@@ -158,6 +185,13 @@ public class GlassWindow : Window
 		EnsureLiveBlur();
 	}
 
+	protected override void OnClosing(CancelEventArgs e)
+	{
+		base.OnClosing(e);
+		// 取消关闭（例如 Dock 把关闭转成退出）不能把“允许隐藏”粘住，否则之后的 Win+D 会真的藏窗口。
+		windowClosing = !e.Cancel;
+	}
+
 	protected override void OnClosed(EventArgs e)
 	{
 		// 窗口销毁即释放实时模糊循环（材质切换时 SetMaterial 也会停）
@@ -165,6 +199,165 @@ public class GlassWindow : Window
 		liveBlurTimer = null;
 		base.OnClosed(e);
 	}
+
+	[UnmanagedFunctionPointer(CallingConvention.StdCall)]
+	private delegate IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wp, IntPtr lp);
+
+	private int lastHideRejectTick;
+
+	// 子类化挂在 WPF 窗口过程外面：ShowWindow 把 WM_WINDOWPOSCHANGING 发给当前过程，
+	// 改掉 lParam 里的 SWP_HIDEWINDOW 后，user32 才会放弃隐藏。钩子挂在 WPF 过程内部，挡不住这一步。
+	private void InstallShowDesktopShield(IntPtr hwnd)
+	{
+		if (hwnd == IntPtr.Zero || hwnd == shieldedHwnd)
+		{
+			return;
+		}
+		showDesktopShield = showDesktopShield ?? ShieldWndProc;
+		prevWndProc = SetWndProc(hwnd, Marshal.GetFunctionPointerForDelegate(showDesktopShield));
+		shieldedHwnd = hwnd;
+		if (prevWndProc == IntPtr.Zero)
+		{
+			Store.Log(new Win32Exception(Marshal.GetLastWin32Error(), "安装显示桌面隐藏拦截失败"));
+		}
+	}
+
+	private IntPtr ShieldWndProc(IntPtr hwnd, int msg, IntPtr wp, IntPtr lp)
+	{
+		try
+		{
+			if (!ExternalHideAllowed && !windowClosing)
+			{
+				if (msg == 24 && wp == IntPtr.Zero && lp == IntPtr.Zero)
+				{
+					NoteRejectedHide();
+					return IntPtr.Zero;
+				}
+				if (msg == 0x0046)
+				{
+					StripUnsolicitedHide(lp);
+				}
+				else if (msg == 0x007C && wp.ToInt64() == -16)
+				{
+					StripStyleHide(lp);
+				}
+			}
+		}
+		catch (Exception ex)
+		{
+			Store.Log(ex);
+		}
+		if (prevWndProc == IntPtr.Zero)
+		{
+			return DefWindowProc(hwnd, msg, wp, lp);
+		}
+		return CallWindowProc(prevWndProc, hwnd, msg, wp, lp);
+	}
+
+	private unsafe void StripUnsolicitedHide(IntPtr lp)
+	{
+		if (lp == IntPtr.Zero)
+		{
+			return;
+		}
+		WINDOWPOS* pos = (WINDOWPOS*)lp.ToPointer();
+		uint kept = ShowDesktopRules.AllowHideFlags(pos->flags, consent: false, closing: false);
+		if (kept != pos->flags)
+		{
+			pos->flags = kept;
+			NoteRejectedHide();
+		}
+	}
+
+	private unsafe void StripStyleHide(IntPtr lp)
+	{
+		if (lp == IntPtr.Zero)
+		{
+			return;
+		}
+		STYLESTRUCT* style = (STYLESTRUCT*)lp.ToPointer();
+		const int WS_VISIBLE = 0x10000000;
+		if ((style->styleOld & WS_VISIBLE) != 0 && (style->styleNew & WS_VISIBLE) == 0)
+		{
+			style->styleNew |= WS_VISIBLE;
+			NoteRejectedHide();
+		}
+	}
+
+	private string KeepVisibleKind()
+	{
+		if (this is DockWindow)
+		{
+			return "Dock";
+		}
+		if (this is WidgetWindow)
+		{
+			return "Widget";
+		}
+		if (this is IslandWindow)
+		{
+			return "Island";
+		}
+		return GetType().Name;
+	}
+
+	private void NoteRejectedHide()
+	{
+		int now = Environment.TickCount;
+		if (unchecked(now - lastHideRejectTick) < 2000)
+		{
+			return;
+		}
+		lastHideRejectTick = now;
+		Store.Trace("WINDOW reject external hide cls=" + GetType().Name);
+	}
+
+	private static IntPtr SetWndProc(IntPtr hwnd, IntPtr proc)
+	{
+		if (IntPtr.Size == 8)
+		{
+			return SetWindowLongPtr(hwnd, -4, proc);
+		}
+		return new IntPtr(SetWindowLong(hwnd, -4, proc.ToInt32()));
+	}
+
+	[StructLayout(LayoutKind.Sequential)]
+	private struct WINDOWPOS
+	{
+		public IntPtr hwnd;
+
+		public IntPtr hwndInsertAfter;
+
+		public int x;
+
+		public int y;
+
+		public int cx;
+
+		public int cy;
+
+		public uint flags;
+	}
+
+	[StructLayout(LayoutKind.Sequential)]
+	private struct STYLESTRUCT
+	{
+		public int styleOld;
+
+		public int styleNew;
+	}
+
+	[DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
+	private static extern IntPtr SetWindowLongPtr(IntPtr hwnd, int index, IntPtr value);
+
+	[DllImport("user32.dll", EntryPoint = "SetWindowLongW", SetLastError = true)]
+	private static extern int SetWindowLong(IntPtr hwnd, int index, int value);
+
+	[DllImport("user32.dll", EntryPoint = "CallWindowProcW")]
+	private static extern IntPtr CallWindowProc(IntPtr prev, IntPtr hwnd, int msg, IntPtr wp, IntPtr lp);
+
+	[DllImport("user32.dll", EntryPoint = "DefWindowProcW")]
+	private static extern IntPtr DefWindowProc(IntPtr hwnd, int msg, IntPtr wp, IntPtr lp);
 
 	protected static ControlTemplate GripTemplate(bool corner = false)
 	{
@@ -190,7 +383,6 @@ public class GlassWindow : Window
 	{
 		WindowStyle = WindowStyle.None;
 		AllowsTransparency = true;
-		Closing += (object s, CancelEventArgs e) => { windowClosing = true; };
 		// 透明窗口下 WPF 禁用 ClearType（退化灰度抗锯齿）：全窗口切到 Display 像素对齐
 		// 文本模式 + 布局整数舍入，小字号文字不发虚、无像素锯齿感。
 		TextOptions.SetTextFormattingMode(this, TextFormattingMode.Display);
@@ -232,31 +424,33 @@ public class GlassWindow : Window
 			{
 				Store.Log(ex);
 			}
-			// 屏蔽「显示桌面」的最小化广播：Dock 与组件保持可见（与系统任务栏同等待遇）。
-			// 不校验 lParam：键盘触发（Win+D / Win+M）时 lParam=0，点击任务栏右侧
-			// 「显示桌面」竖条触发时 lParam 为鼠标坐标——两种都要拦，且本窗口没有
-			// 最小化按钮，任何外部 SC_MINIMIZE 都是广播而非用户主动操作。
+			// 只保护一直放在桌面上的 Dock / 灵动岛 / 组件。启动台、控制中心会自己 Hide，
+			// 拦截它们的 SW_HIDE 会把已经关掉的面板留在最前面（0.9.22.2 的 BoardWindow）。
+			bool keepVisible = ShowDesktopRules.KeepVisibleSurface(KeepVisibleKind());
+			if (keepVisible)
+			{
+				InstallShowDesktopShield(new WindowInteropHelper(this).Handle);
+			}
 			HwndSource.FromHwnd(new WindowInteropHelper(this).Handle)?.AddHook((IntPtr hwnd, int msg, IntPtr wp, IntPtr lp, ref bool handled) =>
 			{
-				if (msg == 274 && ((wp.ToInt64() & 0xFFF0) == 0xF020))
+				if (keepVisible && msg == 274 && ((wp.ToInt64() & 0xFFF0) == 0xF020))
 				{
 					handled = true;
 					return IntPtr.Zero;
 				}
-				// 拦截外部隐藏：显示桌面若以 ShowWindow(SW_HIDE) 方式收起工具窗口
-				// （toolwindow 不参与最小化流程），会在 WM_SHOWWINDOW(wParam=0) 出现。
-				// 只有带通行证的主动 Hide()（游戏模式等）放行，其余一律拦下。
-				if (msg == 24 && wp == IntPtr.Zero)
+				if (keepVisible && msg == 0x0046)
 				{
-					if (ExternalHideAllowed)
-					{
-						ExternalHideAllowed = false;
-					}
-					else if (!windowClosing)
-					{
-						handled = true;
-						return IntPtr.Zero;
-					}
+					StripUnsolicitedHide(lp);
+				}
+				else if (keepVisible && msg == 0x007C && wp.ToInt64() == -16)
+				{
+					StripStyleHide(lp);
+				}
+				if (keepVisible && msg == 24 && wp == IntPtr.Zero && lp == IntPtr.Zero && !ExternalHideAllowed && !windowClosing)
+				{
+					handled = true;
+					NoteRejectedHide();
+					return IntPtr.Zero;
 				}
 				if (this is WidgetWindow widget && msg == 22 && wp != IntPtr.Zero)
 				{

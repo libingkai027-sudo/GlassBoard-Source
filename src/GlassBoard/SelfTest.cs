@@ -46,7 +46,7 @@ public static class SelfTest
 			Show();
 			Backdrop(light: true);
 			RequireCaptureAllowed();
-			Hide();
+			HideWithConsent();
 			RequireCaptureAllowed();
 		}
 
@@ -120,6 +120,7 @@ public static class SelfTest
 	{
 		try
 		{
+			ShowDesktopRules.RunChecks();
 			CheckMemoryResources();
 			MenuAppearanceChecks.Run();
 			DockBehaviorChecks.Run();
