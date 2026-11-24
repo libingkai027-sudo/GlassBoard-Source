@@ -34,13 +34,13 @@ public static class DesktopCoverGuard
 		public int LastReshow;
 
 		public int LastPlace;
+
+		public bool WasBelow;
 	}
 
 	private static readonly List<Tracked> Windows = new List<Tracked>();
 
 	private static readonly IntPtr HwndNotTopmost = new IntPtr(-2);
-
-	private const int ProbeSteps = 48;
 
 	private const uint PlaceFlags = 0x0001 | 0x0002 | 0x0010 | 0x0200;
 
@@ -103,10 +103,9 @@ public static class DesktopCoverGuard
 		try
 		{
 			IntPtr foreground = GetForegroundWindow();
-			bool shell = IsShellForeground(foreground);
-			bool normal = !shell && IsNormalForeground(foreground);
-			// 只有前台已经是桌面层时才顺着 Z 序找它。平时不扫窗口。
-			bool covered = shell && AnyUnderDesktop();
+			bool foregroundNormal = IsNormalForeground(foreground);
+			List<Ordered> order = BuildOrder(foreground, foregroundNormal);
+			bool covered = AnyTrackedBelowWallpaper(order);
 			if (covered)
 			{
 				quietTicks = 0;
@@ -124,7 +123,7 @@ public static class DesktopCoverGuard
 			}
 			for (int i = 0; i < Windows.Count; i++)
 			{
-				PlaceIfNeeded(Windows[i], foreground, shell, normal);
+				PlaceIfNeeded(Windows[i], order);
 			}
 			Reshow();
 		}
@@ -138,7 +137,14 @@ public static class DesktopCoverGuard
 		}
 	}
 
-	private static void PlaceIfNeeded(Tracked item, IntPtr foreground, bool shell, bool normal)
+	private struct Ordered
+	{
+		public IntPtr Hwnd;
+
+		public ShowDesktopRules.ZWindow Z;
+	}
+
+	private static void PlaceIfNeeded(Tracked item, List<Ordered> order)
 	{
 		Window win = item.Win;
 		if (win.Topmost)
@@ -154,30 +160,20 @@ public static class DesktopCoverGuard
 		{
 			return;
 		}
-		if (hwnd == IntPtr.Zero || !IsWindow(hwnd) || !IsWindowVisible(hwnd))
+		if (hwnd == IntPtr.Zero || !IsWindow(hwnd))
 		{
 			return;
 		}
-		bool bit = (GetWindowLong(hwnd, -20) & 8) != 0;
-		if (shell)
+		int index = IndexOf(order, hwnd);
+		List<ShowDesktopRules.ZWindow> view = ViewOf(order);
+		ShowDesktopRules.PlaceKind action = index < 0 ? ShowDesktopRules.PlaceKind.None : ShowDesktopRules.ActionFor(view, index);
+		bool below = action == ShowDesktopRules.PlaceKind.AboveWallpaper;
+		if (below != item.WasBelow)
 		{
-			if (!bit && !DesktopAbove(hwnd))
-			{
-				return;
-			}
-			int nowShell = Environment.TickCount;
-			if (unchecked(nowShell - item.LastPlace) < 1500)
-			{
-				return;
-			}
-			item.LastPlace = nowShell;
-			SetWindowPos(hwnd, bit ? HwndNotTopmost : IntPtr.Zero, 0, 0, 0, 0, PlaceFlags);
-			Store.Trace("COVERGUARD place desktop cls=" + win.GetType().Name);
-			return;
+			item.WasBelow = below;
+			Store.Trace(TopoLine(win, hwnd, view, below ? "below" : "above", "none"));
 		}
-		bool aboveForeground = normal && IsAbove(hwnd, foreground);
-		bool aboveOlder = AboveNormalTowardDesktop(hwnd);
-		if (!bit && !aboveForeground && !aboveOlder)
+		if (!IsWindowVisible(hwnd) || action == ShowDesktopRules.PlaceKind.None)
 		{
 			return;
 		}
@@ -187,96 +183,133 @@ public static class DesktopCoverGuard
 			return;
 		}
 		item.LastPlace = now;
-		IntPtr slot = LowestSlot();
-		if (slot == IntPtr.Zero || slot == hwnd)
+		if (action == ShowDesktopRules.PlaceKind.BelowForeground)
 		{
-			if (!bit || foreground == IntPtr.Zero)
+			int foreground = ShowDesktopRules.ForegroundIndex(view);
+			if (foreground < 0)
 			{
 				return;
 			}
-			SetWindowPos(hwnd, foreground, 0, 0, 0, 0, PlaceFlags);
-			Store.Trace("COVERGUARD clear-topmost cls=" + win.GetType().Name);
+			SetWindowPos(hwnd, order[foreground].Hwnd, 0, 0, 0, 0, PlaceFlags);
+			Store.Trace(TopoLine(win, hwnd, view, "above-app", "below-foreground"));
 			return;
 		}
-		SetWindowPos(hwnd, slot, 0, 0, 0, 0, PlaceFlags);
-		Store.Trace("COVERGUARD place under-apps cls=" + win.GetType().Name);
+		int desk = ShowDesktopRules.HighestDesktopIndex(view);
+		if (desk < 0)
+		{
+			return;
+		}
+		PlaceAboveLayer(hwnd, order[desk].Hwnd);
+		Store.Trace(TopoLine(win, hwnd, view, "below", "above-wallpaper"));
 	}
 
-	// Progman 正上方、跳过壳层和自己之后的那个窗口。把登记窗口插到它下面，就落在所有普通窗口之下、桌面层之上。
-	private static IntPtr LowestSlot()
+	// 插到最高可见壁纸层的正上方。本机那一层是带 SHELLDLL_DefView 的 WorkerW，它还在 Wallpaper Engine 的 WorkerW 和 Progman 前面。
+	private static void PlaceAboveLayer(IntPtr hwnd, IntPtr layer)
 	{
-		IntPtr prog = FindWindow("Progman", null);
-		if (prog == IntPtr.Zero)
+		IntPtr prev = GetWindow(layer, 3u);
+		for (int i = 0; i < 12 && prev != IntPtr.Zero; i++)
 		{
-			return IntPtr.Zero;
-		}
-		IntPtr w = GetWindow(prog, 3u);
-		for (int i = 0; i < 8 && w != IntPtr.Zero; i++)
-		{
-			if (!IsTracked(w) && !IsShellClass(w))
+			if (prev == hwnd)
 			{
-				return w;
+				return;
 			}
-			w = GetWindow(w, 3u);
+			if (!IsTracked(prev) && !IsDesktopLayer(prev) && (GetWindowLong(prev, -20) & 8) == 0)
+			{
+				break;
+			}
+			prev = GetWindow(prev, 3u);
 		}
-		return IntPtr.Zero;
+		bool bit = (GetWindowLong(hwnd, -20) & 8) != 0;
+		IntPtr after = prev == IntPtr.Zero || prev == hwnd ? (bit ? HwndNotTopmost : IntPtr.Zero) : prev;
+		SetWindowPos(hwnd, after, 0, 0, 0, 0, PlaceFlags);
 	}
 
-	// 从本窗口往桌面层方向最多看 80 个 HWND。看见普通窗口说明我们盖住了它。
-	// 80 步以内没有，就不再往下扫，避免每秒走完整的顶层窗口表。
-	private static bool AboveNormalTowardDesktop(IntPtr hwnd)
+	private static string TopoLine(Window win, IntPtr hwnd, List<ShowDesktopRules.ZWindow> view, string relation, string action)
 	{
-		IntPtr prog = FindWindow("Progman", null);
-		IntPtr w = hwnd;
-		for (int i = 0; i < 80; i++)
-		{
-			w = GetWindow(w, 2u);
-			if (w == IntPtr.Zero || w == prog)
-			{
-				return false;
-			}
-			if (IsShellClass(w))
-			{
-				continue;
-			}
-			if (IsNormalForeground(w))
-			{
-				return true;
-			}
-		}
-		return false;
+		int cloak = 0;
+		DwmGetWindowAttribute(hwnd, 14, out cloak, 4);
+		bool iconic = IsIconic(hwnd);
+		bool visible = IsWindowVisible(hwnd);
+		bool topmost = (GetWindowLong(hwnd, -20) & 8) != 0;
+		return "COVERGUARD topo cls=" + win.GetType().Name + " vis=" + (visible ? 1 : 0) + " iconic=" + (iconic ? 1 : 0) + " cloak=" + cloak + " topmost=" + (topmost ? 1 : 0) + " desk=" + ShowDesktopRules.HighestDesktopKind(view) + " relation=" + relation + " action=" + action;
 	}
 
-	private static bool AnyUnderDesktop()
+	private static List<Ordered> BuildOrder(IntPtr foreground, bool foregroundNormal)
 	{
+		HashSet<IntPtr> tracked = new HashSet<IntPtr>();
 		for (int i = 0; i < Windows.Count; i++)
 		{
 			try
 			{
 				IntPtr hwnd = new WindowInteropHelper(Windows[i].Win).Handle;
-				if (hwnd != IntPtr.Zero && IsWindowVisible(hwnd) && DesktopAbove(hwnd))
+				if (hwnd != IntPtr.Zero)
 				{
-					return true;
+					tracked.Add(hwnd);
 				}
 			}
 			catch (InvalidOperationException)
 			{
 			}
 		}
-		return false;
+		List<Ordered> list = new List<Ordered>();
+		HashSet<IntPtr> seen = new HashSet<IntPtr>();
+		IntPtr cursor = GetTopWindow(IntPtr.Zero);
+		while (cursor != IntPtr.Zero && seen.Add(cursor))
+		{
+			string cls = ClassOf(cursor);
+			ShowDesktopRules.ZWindow z = new ShowDesktopRules.ZWindow
+			{
+				Visible = IsWindowVisible(cursor)
+			};
+			if (cls == "Progman")
+			{
+				z.Kind = ShowDesktopRules.DesktopKind.Progman;
+				z.Desktop = true;
+			}
+			else if (cls == "WorkerW" && z.Visible)
+			{
+				if (FindWindowEx(cursor, IntPtr.Zero, "SHELLDLL_DefView", null) != IntPtr.Zero)
+				{
+					z.Kind = ShowDesktopRules.DesktopKind.IconHost;
+					z.Desktop = true;
+				}
+				else if (FindWindowEx(cursor, IntPtr.Zero, "WPEDesktopDX11Window", null) != IntPtr.Zero)
+				{
+					z.Kind = ShowDesktopRules.DesktopKind.WallpaperHost;
+					z.Desktop = true;
+				}
+			}
+			if (tracked.Contains(cursor))
+			{
+				z.Tracked = true;
+			}
+			if (cursor == foreground && foregroundNormal)
+			{
+				z.Foreground = true;
+				GetWindowRect(cursor, out RECT rect);
+				z.Width = rect.Right - rect.Left;
+				z.Height = rect.Bottom - rect.Top;
+				z.Visible = true;
+			}
+			if (z.Desktop || z.Tracked || z.Foreground)
+			{
+				list.Add(new Ordered
+				{
+					Hwnd = cursor,
+					Z = z
+				});
+			}
+			cursor = GetWindow(cursor, 2u);
+		}
+		return list;
 	}
 
-	private static bool DesktopAbove(IntPtr hwnd)
+	private static bool AnyTrackedBelowWallpaper(List<Ordered> order)
 	{
-		IntPtr w = hwnd;
-		for (int i = 0; i < ProbeSteps; i++)
+		List<ShowDesktopRules.ZWindow> view = ViewOf(order);
+		for (int i = 0; i < order.Count; i++)
 		{
-			w = GetWindow(w, 3u);
-			if (w == IntPtr.Zero)
-			{
-				return false;
-			}
-			if (IsShellClass(w))
+			if (order[i].Z.Tracked && ShowDesktopRules.ActionFor(view, i) == ShowDesktopRules.PlaceKind.AboveWallpaper)
 			{
 				return true;
 			}
@@ -284,26 +317,40 @@ public static class DesktopCoverGuard
 		return false;
 	}
 
-	private static bool IsAbove(IntPtr upper, IntPtr lower)
+	private static int IndexOf(List<Ordered> order, IntPtr hwnd)
 	{
-		if (upper == IntPtr.Zero || lower == IntPtr.Zero || upper == lower)
+		for (int i = 0; i < order.Count; i++)
+		{
+			if (order[i].Hwnd == hwnd)
+			{
+				return i;
+			}
+		}
+		return -1;
+	}
+
+	private static List<ShowDesktopRules.ZWindow> ViewOf(List<Ordered> order)
+	{
+		List<ShowDesktopRules.ZWindow> view = new List<ShowDesktopRules.ZWindow>(order.Count);
+		for (int i = 0; i < order.Count; i++)
+		{
+			view.Add(order[i].Z);
+		}
+		return view;
+	}
+
+	private static bool IsDesktopLayer(IntPtr hwnd)
+	{
+		string cls = ClassOf(hwnd);
+		if (cls == "Progman")
+		{
+			return true;
+		}
+		if (cls != "WorkerW")
 		{
 			return false;
 		}
-		IntPtr w = lower;
-		for (int i = 0; i < ProbeSteps; i++)
-		{
-			w = GetWindow(w, 3u);
-			if (w == IntPtr.Zero)
-			{
-				return false;
-			}
-			if (w == upper)
-			{
-				return true;
-			}
-		}
-		return false;
+		return FindWindowEx(hwnd, IntPtr.Zero, "SHELLDLL_DefView", null) != IntPtr.Zero || FindWindowEx(hwnd, IntPtr.Zero, "WPEDesktopDX11Window", null) != IntPtr.Zero;
 	}
 
 	private static bool IsTracked(IntPtr hwnd)
@@ -322,11 +369,6 @@ public static class DesktopCoverGuard
 			}
 		}
 		return false;
-	}
-
-	private static bool IsShellForeground(IntPtr hwnd)
-	{
-		return hwnd != IntPtr.Zero && IsShellClass(hwnd);
 	}
 
 	private static bool IsNormalForeground(IntPtr hwnd)
@@ -358,11 +400,6 @@ public static class DesktopCoverGuard
 			return width >= 800 && height >= 480;
 		}
 		return width >= ShowDesktopRules.MinLiveWidth && height >= ShowDesktopRules.MinLiveHeight;
-	}
-
-	private static bool IsShellClass(IntPtr hwnd)
-	{
-		return ShowDesktopRules.IsDesktopClass(ClassOf(hwnd));
 	}
 
 	private static void Notify()
@@ -467,6 +504,15 @@ public static class DesktopCoverGuard
 
 	[DllImport("user32.dll")]
 	private static extern IntPtr GetForegroundWindow();
+
+	[DllImport("user32.dll")]
+	private static extern IntPtr GetTopWindow(IntPtr hwnd);
+
+	[DllImport("user32.dll", CharSet = CharSet.Unicode)]
+	private static extern IntPtr FindWindowEx(IntPtr parent, IntPtr child, string cls, string title);
+
+	[DllImport("dwmapi.dll")]
+	private static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out int value, int size);
 
 	[DllImport("user32.dll")]
 	private static extern IntPtr GetWindow(IntPtr hwnd, uint cmd);

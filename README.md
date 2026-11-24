@@ -1,4 +1,4 @@
-# GlassBoard-Source v0.9.22.3
+# GlassBoard-Source v0.9.22.4
 
 一个运行在 Windows 10/11 上的免费桌面启动台——毛玻璃 Dock 栏、应用面板、控制中心、桌面组件、灵动岛、壁纸引擎，一次装齐。
 
@@ -38,7 +38,14 @@ dotnet build src\GlassBoard.csproj -c Release
 
 ## 发布说明
 
-本仓库源码对应 v0.9.22.3（程序集版本 0.9.22.3）。仓库根目录里的 `GlassBoard.exe` 仍是更早的便携文件。配置文件 `layout.json` 与 v0.9.22.0 兼容。
+本仓库源码对应 v0.9.22.4（程序集版本 0.9.22.4）。仓库根目录里的 `GlassBoard.exe` 仍是更早的便携文件。配置文件 `layout.json` 与 v0.9.22.0 兼容。
+
+### v0.9.22.4 更新内容
+
+- 显示桌面时不再把 Dock / 灵动岛 / 组件贴到 Progman 上。本机壁纸是两个全屏 WorkerW（上面一层带桌面图标列表，下面一层是 Wallpaper Engine），都在 Progman 前面；锚点改成这两层里更靠前的那一层。
+- 前台已经是普通窗口时，只在自己盖住这个前台窗口时才挪到它下面，不再为了“下沉”去贴 Progman。
+- 关系变化时写一行 `COVERGUARD topo`（仅自己的可见/最小化/cloak/置顶，以及壁纸层种类），方便事后对照，不必为了看状态而切回前台。
+- Linux 上的规则测试不能代替这台机器上的 Win+D。未在 Windows 上验证。
 
 ### v0.9.22.3 更新内容
 

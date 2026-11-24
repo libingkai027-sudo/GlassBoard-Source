@@ -26,6 +26,21 @@ public static class ShowDesktopRules
 
 	public const int MinLiveHeight = 120;
 
+	public enum DesktopKind
+	{
+		None = 0,
+		Progman = 1,
+		IconHost = 2,
+		WallpaperHost = 3
+	}
+
+	public enum PlaceKind
+	{
+		None = 0,
+		AboveWallpaper = 1,
+		BelowForeground = 2
+	}
+
 	public struct ZWindow
 	{
 		public bool Visible;
@@ -50,9 +65,15 @@ public static class ShowDesktopRules
 
 		public bool ShellChrome;
 
+		public bool Foreground;
+
+		public DesktopKind Kind;
+
 		public int Width;
 
 		public int Height;
+
+		public bool IsDesktopLayer => Desktop || Kind != DesktopKind.None;
 	}
 
 	public struct Latch
@@ -152,6 +173,70 @@ public static class ShowDesktopRules
 	public static bool ShouldForceTopmost()
 	{
 		return false;
+	}
+
+	public static int HighestDesktopIndex(IReadOnlyList<ZWindow> topToBottom)
+	{
+		for (int i = 0; i < topToBottom.Count; i++)
+		{
+			ZWindow w = topToBottom[i];
+			if (w.Visible && !w.Cloaked && w.IsDesktopLayer)
+			{
+				return i;
+			}
+		}
+		return -1;
+	}
+
+	public static DesktopKind HighestDesktopKind(IReadOnlyList<ZWindow> topToBottom)
+	{
+		int index = HighestDesktopIndex(topToBottom);
+		if (index < 0)
+		{
+			return DesktopKind.None;
+		}
+		DesktopKind kind = topToBottom[index].Kind;
+		return kind == DesktopKind.None ? DesktopKind.Progman : kind;
+	}
+
+	public static int ForegroundIndex(IReadOnlyList<ZWindow> topToBottom)
+	{
+		int desk = HighestDesktopIndex(topToBottom);
+		for (int i = 0; i < topToBottom.Count; i++)
+		{
+			ZWindow w = topToBottom[i];
+			if (!w.Foreground || !IsNormalApp(w))
+			{
+				continue;
+			}
+			if (desk >= 0 && i > desk)
+			{
+				return -1;
+			}
+			return i;
+		}
+		return -1;
+	}
+
+	// 登记窗口在最高的可见壁纸层下面 → 抬到那一层上面（本机是带 DefView 的 WorkerW，不是 Progman）。
+	// 登记窗口在前台普通窗口上面 → 只插到那个前台窗口下面，不改到 Progman。
+	public static PlaceKind ActionFor(IReadOnlyList<ZWindow> topToBottom, int index)
+	{
+		if (index < 0 || index >= topToBottom.Count || !topToBottom[index].Tracked || !topToBottom[index].Visible)
+		{
+			return PlaceKind.None;
+		}
+		int foreground = ForegroundIndex(topToBottom);
+		if (foreground >= 0 && index < foreground)
+		{
+			return PlaceKind.BelowForeground;
+		}
+		int desk = HighestDesktopIndex(topToBottom);
+		if (desk >= 0 && index > desk)
+		{
+			return PlaceKind.AboveWallpaper;
+		}
+		return PlaceKind.None;
 	}
 
 	public static bool IsNormalAppAboveDesktop(IReadOnlyList<ZWindow> topToBottom)
@@ -473,15 +558,31 @@ public static class ShowDesktopRules
 		Expect(ShellHolding(wallpaperHeld), "wallpaper does not clear shell holding");
 		Expect(!ShouldHideIsland(showDesktop: true, manualGame: false, autoGame: false, fullscreen: true, maximized: false, showOnFullscreen: false, expanded: true, toast: false, alreadyHidden: false), "expanded island is not hidden by show desktop");
 		ZWindow cursor = Live(width: 1300, height: 810);
-		ZWindow older = Live(width: 1100, height: 700);
-		List<ZWindow> aboveOlder = new List<ZWindow> { cursor, dock, older, progman };
-		Expect(TrackedAboveNormalApp(aboveOlder) && NeedsReorder(aboveOlder), "dock below the foreground can still cover an older window");
-		Expect(!ShouldForceTopmost(), "covering an older window must not turn topmost on");
-		List<ZWindow> sunk = new List<ZWindow> { cursor, older, dock, progman };
-		Expect(!NeedsReorder(sunk) && !ShowDesktopSession(sunk), "after one sink, foreground and older windows cover the dock");
+		cursor.Foreground = true;
+		ZWindow nextApp = Live(width: 1200, height: 800);
+		nextApp.Foreground = true;
+		ZWindow defview = Layer(ShowDesktopRules.DesktopKind.IconHost);
+		ZWindow wpe = Layer(ShowDesktopRules.DesktopKind.WallpaperHost);
+		ZWindow prog = Layer(ShowDesktopRules.DesktopKind.Progman);
+		List<ZWindow> machine = new List<ZWindow> { cursor, dock, defview, wpe, prog };
+		Expect(HighestDesktopKind(machine) == DesktopKind.IconHost, "highest wallpaper layer is the DefView WorkerW, above the Wallpaper Engine WorkerW and Progman");
+		Expect(ActionFor(machine, 1) == PlaceKind.None && !ShouldForceTopmost(), "foreground above dock and both WorkerWs above Progman: no move");
 		for (int frame = 0; frame < 20; frame++)
 		{
-			Expect(!NeedsReorder(sunk) && !ShouldForceTopmost(), "switching apps does not start a raise or reshow loop");
+			Expect(ActionFor(machine, 1) == PlaceKind.None, "stable foreground does not repeat placement");
+		}
+		List<ZWindow> behindBoth = new List<ZWindow> { defview, wpe, dock, prog };
+		Expect(ActionFor(behindBoth, 2) == PlaceKind.AboveWallpaper, "between the two WorkerWs is still behind the visible DefView layer");
+		List<ZWindow> aboveProgmanOnly = new List<ZWindow> { defview, wpe, prog, dock };
+		Expect(ActionFor(aboveProgmanOnly, 3) == PlaceKind.AboveWallpaper, "merely above Progman is still below both visible WorkerWs");
+		Expect(HighestDesktopKind(aboveProgmanOnly) != DesktopKind.Progman, "anchor must not be Progman while either WorkerW is visible above it");
+		List<ZWindow> switched = new List<ZWindow> { dock, nextApp, defview, wpe, prog };
+		Expect(ActionFor(switched, 0) == PlaceKind.BelowForeground, "foreground transition: dock above the new app moves below that app");
+		List<ZWindow> afterSwitch = new List<ZWindow> { nextApp, dock, defview, wpe, prog };
+		Expect(ActionFor(afterSwitch, 1) == PlaceKind.None, "after the foreground move the dock stays above both WorkerWs");
+		for (int frame = 0; frame < 20; frame++)
+		{
+			Expect(ActionFor(afterSwitch, 1) == PlaceKind.None && !ShouldForceTopmost(), "foreground transition does not oscillate");
 		}
 		List<ZWindow> showDesktop = new List<ZWindow> { worker, dock, iconic };
 		Expect(NeedsReorder(showDesktop) && ShowDesktopSession(showDesktop) && !ShouldForceTopmost(), "show desktop lifts without topmost");
@@ -493,7 +594,6 @@ public static class ShowDesktopRules
 		}
 		List<ZWindow> edgeOnly = new List<ZWindow> { edge, dock, progman };
 		Expect(!NeedsReorder(edgeOnly), "a small edge tool window is not a normal app to sink under");
-		Expect(InsertAfterIndex(aboveOlder) == 2, "sink target is the older window just above the desktop");
 	}
 
 	private static List<ZWindow> LongStack(ZWindow edge, ZWindow worker, ZWindow dock, ZWindow iconic)
@@ -536,6 +636,19 @@ public static class ShowDesktopRules
 			ShellChrome = true,
 			Width = 1920,
 			Height = 1080
+		};
+	}
+
+	private static ZWindow Layer(DesktopKind kind)
+	{
+		return new ZWindow
+		{
+			Visible = true,
+			Desktop = true,
+			ShellChrome = true,
+			Kind = kind,
+			Width = 2293,
+			Height = 960
 		};
 	}
 
