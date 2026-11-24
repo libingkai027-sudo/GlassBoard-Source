@@ -716,7 +716,7 @@ public sealed class WidgetWindow : GlassWindow
 		{
 			desktopRaised = r;
 			ApplyTopmost();
-		});
+		}, () => !stopped && !M.C.GlassSuppressed);
 		moveGrip = new Thumb
 		{
 			Width = 48.0,

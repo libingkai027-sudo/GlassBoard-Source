@@ -371,7 +371,12 @@ public class DockWindow : GlassWindow
 		{
 			desktopRaised = r;
 			ApplyTopmost();
-		});
+		}, () => !C.ShuttingDown && !C.GlassSuppressed);
+		DesktopCoverGuard.ShowDesktopChanged += OnShowDesktopForGameMode;
+		Closed += (object s, EventArgs e) =>
+		{
+			DesktopCoverGuard.ShowDesktopChanged -= OnShowDesktopForGameMode;
+		};
 		ContentGrid.Children.Add(Items);
 		MouseMove += OnDockZoomMove;
 		MouseLeave += OnDockZoomLeave;
@@ -3344,6 +3349,18 @@ public class DockWindow : GlassWindow
 		if (IsVisible)
 		{
 			ApplyTopmost();
+		}
+	}
+
+	private void OnShowDesktopForGameMode()
+	{
+		try
+		{
+			C.CheckGameMode();
+		}
+		catch (Exception ex)
+		{
+			Store.Log(ex);
 		}
 	}
 

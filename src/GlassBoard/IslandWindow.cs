@@ -276,7 +276,8 @@ IslandAudio.AudioLevels += OnAudioLevels;
 		{
 			desktopRaised = raised;
 			ApplyTopmost();
-		});
+		}, () => !_isClosed && O != null && O.Enabled && mode != Mode.Hidden);
+		DesktopCoverGuard.ShowDesktopChanged += OnShowDesktopForFullscreen;
 		PreviewKeyDown += (object s, KeyEventArgs e) =>
 		{
 			if (e.Key == Key.Escape && mode == Mode.Expanded)
@@ -302,6 +303,7 @@ IslandAudio.AudioLevels += OnAudioLevels;
 			{
 				focusTimer.Stop();
 			}
+			DesktopCoverGuard.ShowDesktopChanged -= OnShowDesktopForFullscreen;
 			IslandAudio.AudioLevels -= OnAudioLevels;
 			StopEqualizer();
 			_isClosed = true;
@@ -4348,8 +4350,7 @@ expandEntrance = true;
 		modeBeforeHide = mode;
 		mode = Mode.Hidden;
 		EnsureControlSyncTimer(); // 隐藏即停同步定时器
-		ExternalHideAllowed = true; // 主动隐藏通行证：显示桌面拦截按主动 Hide 放行
-		Visibility = Visibility.Hidden;
+		ConcealWithConsent();
 		toastTimer.Stop();
 	}
 
@@ -7154,6 +7155,11 @@ tl = 0.0;
 		}
 	}
 
+	private void OnShowDesktopForFullscreen()
+	{
+		CheckFullscreen();
+	}
+
 	public void CheckFullscreen()
 	{
 // 全屏判定要排除“最大化”窗口：任务栏隐�?自动隐藏时，最大化窗口的矩形等于整�?
@@ -7162,24 +7168,30 @@ tl = 0.0;
 
 // 真正的全屏（F11、无边框全屏游戏）通常没有 WS_MAXIMIZE 样式�?
 
-bool full = FullscreenState.Active() && !ForegroundIsMaximized();
-		// 游戏模式：手动开启或自动模式检测到全屏游戏时，岛同样避让（用户反馈：
-		// 进入游戏模式后灵动岛还留在上面）。游戏模式下无视“全屏应用时显示”开关。
-		bool game = C.Prefs.GameMode || (C.Prefs.AutoGameMode && FullscreenState.Active());
-		if (full || game)
+		if (O == null)
 		{
-// 用户主动展开的面板不因全屏策略强制隐藏（规格：展开面板打开时不被事件强行关闭）�?
-
-
-// 只有被动状态（收起�?事件卡）在“全屏时隐藏”开启时避让�?
-
-
-if ((game || !O.ShowOnFullscreen) && mode != Mode.Hidden && (game || mode != Mode.Expanded) && mode != Mode.Toast)
-			{
-				HideForFullscreen();
-			}
+			return;
 		}
-		else if (mode == Mode.Hidden && modeBeforeHide != Mode.Hidden && O.Enabled)
+		bool showDesktop = DesktopCoverGuard.ShowDesktopActive;
+		bool fullscreen = false;
+		bool maximized = false;
+		try
+		{
+			fullscreen = FullscreenState.Active();
+			maximized = ForegroundIsMaximized();
+		}
+		catch
+		{
+		}
+		bool manual = C.Prefs.GameMode;
+		bool auto = C.Prefs.AutoGameMode;
+		// 游戏模式：手动开启或自动模式检测到全屏游戏时，岛同样避让。
+		// 显示桌面的前台抖动不是全屏；手动游戏模式仍然隐藏。
+		if (ShowDesktopRules.ShouldHideIsland(showDesktop, manual, auto, fullscreen, maximized, O.ShowOnFullscreen, mode == Mode.Expanded, mode == Mode.Toast, mode == Mode.Hidden))
+		{
+			HideForFullscreen();
+		}
+		else if (ShowDesktopRules.ShouldRestoreIsland(showDesktop, manual, mode == Mode.Hidden && modeBeforeHide != Mode.Hidden, O.Enabled, fullscreen, maximized, auto))
 		{
 			RestoreFromFullscreen();
 		}
